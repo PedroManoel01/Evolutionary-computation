@@ -1,12 +1,10 @@
 # Algoritmos Evolucionários Dinâmicos para Ponderação de Ensembles Online sob Concept Drift
 
-Projeto de implementação baseado em [Proposta_Projeto_CE.pdf](Proposta_Projeto_CE.pdf) (CIn-UFPE · Computação Evolucionária).
 
 ## Estrutura de Pastas
 
 ```text
 .
-├── Proposta_Projeto_CE.pdf   # Descrição e especificação completa do projeto
 ├── README.md
 ├── pyproject.toml
 ├── requirements.txt
