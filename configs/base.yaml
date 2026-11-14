@@ -1,0 +1,23 @@
+seed: 42
+
+wandb:
+  enabled: true
+  project: "dyn-ea-ensemble-drift"
+  entity: null
+  mode: "online" # "online", "offline" ou "disabled"
+
+pool:
+  models:
+    - GaussianNB
+    - HoeffdingTree
+    - HoeffdingAdaptiveTree
+    - EFDT
+    - SoftmaxRegression
+    - KNN
+    - BaggingHT
+    - AMF
+
+benchmarks:
+  - ARF
+  - SRP
+  - LeveragingBagging

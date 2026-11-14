@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Tests & caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Data & large artifacts
+data/raw/*
+!data/raw/.gitkeep
+data/synthetic/*
+!data/synthetic/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+
+# Results
+results/raw/*
+!results/raw/.gitkeep
+results/tables/*
+!results/tables/.gitkeep
+results/figures/*
+!results/figures/.gitkeep
+
+# Notebooks & OS
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+
+# Weights & Biases
+wandb/
