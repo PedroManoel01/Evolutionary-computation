@@ -1,0 +1,72 @@
+{
+  "n_seeds": 30,
+  "n_runs": 9360,
+  "friedman_all": {
+    "p": 0.05108989428295325,
+    "cd": 8.100679601119896,
+    "ranks": {
+      "B4 Seleção online": 3.667,
+      "B7 Busca aleatória": 5.167,
+      "B6 Hedge": 5.833,
+      "S6 Memória+imig.": 6.167,
+      "B3 Melhor modelo": 6.167,
+      "S4 WS+hipermut.": 6.333,
+      "S1 Reinício": 7.0,
+      "S3 WS+imigrantes": 7.667,
+      "S2 Warm start": 8.0,
+      "S5 Memória": 8.167,
+      "B5 Pond. desempenho": 8.667,
+      "B8 DE": 9.167,
+      "B1 Uniforme": 11.333,
+      "B2 AG congelado": 11.667
+    }
+  },
+  "friedman_strats": {
+    "p": 0.7219988116751228,
+    "cd": 3.078351831743734,
+    "ranks": {
+      "S6 Memória+imig.": 2.667,
+      "S4 WS+hipermut.": 3.0,
+      "S1 Reinício": 3.5,
+      "S3 WS+imigrantes": 3.667,
+      "S2 Warm start": 4.0,
+      "S5 Memória": 4.167
+    }
+  },
+  "friedman_withbench": {
+    "p": 0.08448989312832031,
+    "cd": 10.081715826187526,
+    "ranks": {
+      "ARF": 4.333,
+      "B4 Seleção online": 5.0,
+      "B7 Busca aleatória": 6.667,
+      "B6 Hedge": 7.5,
+      "S6 Memória+imig.": 7.5,
+      "B3 Melhor modelo": 7.833,
+      "S4 WS+hipermut.": 7.833,
+      "S1 Reinício": 8.667,
+      "S3 WS+imigrantes": 9.167,
+      "S2 Warm start": 9.5,
+      "S5 Memória": 9.667,
+      "Lev. Bagging": 9.833,
+      "B5 Pond. desempenho": 10.5,
+      "SRP": 10.833,
+      "B8 DE": 11.167,
+      "B1 Uniforme": 13.167,
+      "B2 AG congelado": 13.833
+    }
+  },
+  "friedman_strats_seeds": {
+    "p": 0.42419438839793155,
+    "cd": 0.5620275793944636,
+    "ranks": {
+      "S6 Memória+imig.": 3.328,
+      "S3 WS+imigrantes": 3.367,
+      "S1 Reinício": 3.506,
+      "S4 WS+hipermut.": 3.556,
+      "S5 Memória": 3.606,
+      "S2 Warm start": 3.639
+    }
+  },
+  "best_strategy": "S6"
+}

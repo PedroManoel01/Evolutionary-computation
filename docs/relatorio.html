@@ -1,0 +1,1060 @@
+<!doctype html><html lang='pt-BR'><head><meta charset='utf-8'><title>Relatório</title><style>
+body { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; max-width: 980px; margin: 24px auto;
+       color: #1d1d1f; line-height: 1.45; font-size: 13px; padding: 0 16px; }
+h1 { color: #1f4e79; font-size: 24px; border-bottom: 3px solid #1f4e79; padding-bottom: 6px; }
+h2 { color: #1f4e79; font-size: 19px; border-bottom: 1px solid #c8d3e0; margin-top: 28px; }
+h3 { color: #1f4e79; font-size: 15px; margin-top: 20px; }
+table { border-collapse: collapse; margin: 10px 0 16px; font-size: 11px; width: 100%; }
+th { background: #1f4e79; color: white; padding: 4px 6px; text-align: left; }
+td { border-bottom: 1px solid #dde3ea; padding: 3px 6px; }
+tr:nth-child(even) td { background: #f5f8fb; }
+code, pre { background: #eef2f6; border-radius: 3px; font-size: 11px; }
+pre { padding: 8px; overflow-x: auto; }
+img { max-width: 100%; display: block; margin: 8px auto; }
+blockquote { border-left: 4px solid #1f4e79; background: #eef3f8; margin: 10px 0; padding: 6px 12px; }
+@media print { h2 { page-break-after: avoid; } table, img { page-break-inside: avoid; } }
+</style></head><body><h1>Algoritmos Evolucionários Dinâmicos para Ponderação de Ensembles Online sob Concept Drift</h1>
+<p><strong>Relatório final do projeto — Computação Evolucionária (Mestrado em Ciência da Computação, CIn-UFPE)</strong>
+Equipe: [nomes dos integrantes] · Novembro de 2026</p>
+<hr />
+<h2>Resumo</h2>
+<p>Modelamos a ponderação de um ensemble online de 8 classificadores incrementais como um problema de otimização
+dinâmica no simplex Δ^8. Um AG de codificação real, com fitness igual ao macro-F1 sobre o buffer do warning, é
+reacionado a cada drift detectado, e comparamos seis formas de montar a população após a mudança (S1–S6).
+Rodamos 9.360 execuções prequenciais (6 bases × 30 sementes × 52 configurações) por replay sobre matrizes de
+probabilidade em cache. <strong>Principais achados:</strong> (i) os pesos evoluídos superam a média uniforme em 5 das 6 bases e
+o Hedge em 2, mas <strong>não superam a seleção online do melhor modelo recente (B4)</strong>, que fica com o melhor rank médio
+entre os métodos de combinação; (ii) <strong>o AG não é melhor que a busca aleatória com o mesmo gatilho e o mesmo
+conjunto de avaliação</strong> (0 vitórias, 6 empates, 0 derrotas): no simplex de dimensão 8, com |E| ≈ 100–400, a
+paisagem é fácil e 1.500 amostras Dirichlet bastam; (iii) <strong>as seis estratégias pós-drift são estatisticamente
+equivalentes</strong> (Friedman p = 0,72), e o warm start não converge mais rápido que o reinício. A única exceção é o
+Elec2, onde warm start (S2) e memória (S5) ganham de S1 com significância e efeito grande; (iv) o desempenho
+depende mais do <strong>detector e do tamanho de E</strong> do que da estratégia. O oráculo, mesmo sem atraso, perde para o
+ADWIN em STAGGER e AGR, porque fixa os pesos por conceito enquanto os modelos ainda estão se readaptando. Por
+isso o gargalo do método está no <em>quando</em> e no <em>com que dados</em> reotimizar, e não em <em>como</em> reaproveitar a
+população.</p>
+<h2>1. Introdução</h2>
+<p>Em data streams com <em>concept drift</em>, o vetor de pesos que melhor combina os modelos de um ensemble muda ao
+longo do tempo. Este trabalho trata a ponderação de um ensemble online como um <strong>problema de otimização
+dinâmica (DOP)</strong>: o espaço de busca é o simplex Δ^M dos vetores de pesos, a paisagem de fitness é o macro-F1
+do ensemble no conceito atual, e a mudança de ambiente é o drift sinalizado por um detector. Um único
+Algoritmo Genético (AG) de codificação real é reacionado a cada drift confirmado, avaliado sobre as
+instâncias acumuladas desde o <em>warning</em> do detector. A variável experimental central é <strong>como a população é
+reaproveitada após a mudança</strong>: comparamos seis mecanismos clássicos de EAs dinâmicos (Nguyen, Yang &amp; Branke,
+2012) — reinício, warm start, imigrantes aleatórios (Grefenstette, 1992), hipermutação disparada
+(Cobb, 1990), memória (Branke, 1999) e um híbrido — contra baselines não evolucionários, busca aleatória com o
+mesmo orçamento, Evolução Diferencial e três ensembles de referência da literatura de streams.</p>
+<p>Perguntas de pesquisa (da proposta):</p>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>Pergunta</th>
+<th>Hipótese</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>QP1</td>
+<td>Pesos evoluídos superam esquemas não evolucionários?</td>
+<td>H1: AG &gt; uniforme, ponderação por desempenho e Hedge</td>
+</tr>
+<tr>
+<td>QP2</td>
+<td>O operador evolucionário importa?</td>
+<td>H2: AG &gt; busca aleatória com o mesmo orçamento</td>
+</tr>
+<tr>
+<td>QP3</td>
+<td>Reaproveitar a população ajuda?</td>
+<td>H3: warm start converge em menos gerações e recupera mais rápido que o reinício</td>
+</tr>
+<tr>
+<td>QP4</td>
+<td>Qual mecanismo para cada tipo de drift?</td>
+<td>H4a: memória vence em drift recorrente; H4b: imigrantes/hipermutação vencem em drift novo</td>
+</tr>
+<tr>
+<td>QP5</td>
+<td>Quanto o detector limita o método?</td>
+<td>H5: a diferença detector real × oráculo é dominada pelo atraso de detecção</td>
+</tr>
+</tbody>
+</table>
+<h2>2. Método</h2>
+<h3>2.1 Arquitetura</h3>
+<pre><code>stream (x_t, y_t) → pool de M=8 modelos online → P_t (M × C) → ŷ_t = argmax_c Σ_m w_m P_t[m,c]
+                                                         ↓ erro 0/1
+                                     detector de drift (warning → buffer; drift → AG)
+                                                         ↓
+                    estratégia pós-drift (S1..S6) monta pop₀ → AG (fitness = macro-F1 em E) → novo w
+</code></pre>
+<p>Os modelos base nunca dependem dos pesos: são treinados <em>test-then-train</em> com todas as instâncias e nunca
+substituídos. O AG apenas decide como combiná-los.</p>
+<p><strong>Pool (river 0.27):</strong> GaussianNB, Hoeffding Tree, Hoeffding Adaptive Tree, EFDT,
+StandardScaler→SoftmaxRegression, KNN (janela 1000), Bagging (5 HT) e AMF (10 árvores).</p>
+<h3>2.2 Algoritmo Genético</h3>
+<table>
+<thead>
+<tr>
+<th>Componente</th>
+<th>Escolha</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Indivíduo</td>
+<td>g ∈ [0,1]^8, reparado para g/Σg após cada operador (uniforme se Σg = 0)</td>
+</tr>
+<tr>
+<td>População</td>
+<td>N = 30; inicialização Dirichlet(1,…,1)</td>
+</tr>
+<tr>
+<td>Seleção de pais</td>
+<td>torneio k = 3</td>
+</tr>
+<tr>
+<td>Cruzamento</td>
+<td>BLX-α, α = 0,5, p_c = 0,9 (+ clip em [0,1] + reparo)</td>
+</tr>
+<tr>
+<td>Mutação</td>
+<td>gaussiana por gene, p_m = 1/M, σ = 0,1 (+ clip + reparo)</td>
+</tr>
+<tr>
+<td>Sobreviventes</td>
+<td>geracional com elitismo de 2</td>
+</tr>
+<tr>
+<td>Parada</td>
+<td>G = 50 gerações ou 10 gerações sem melhoria</td>
+</tr>
+<tr>
+<td>Orçamento</td>
+<td>≤ 30 + 49 × 28 = 1.402 avaliações por otimização</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Fitness:</strong> macro-F1 do ensemble ponderado sobre o conjunto de avaliação E = {(P_i, y_i)}, calculado para a
+população inteira de uma vez com <code>np.einsum</code> (implementação conferida contra
+<code>sklearn.metrics.f1_score(average='macro')</code> nos testes unitários).</p>
+<h3>2.3 Detecção de drift e buffer do warning</h3>
+<ul>
+<li><strong>Par de ADWINs</strong> (principal): ADWIN de warning (δ = 0,01) e de drift (δ = 0,001) sobre o erro 0/1 do ensemble.</li>
+<li><strong>DDM</strong> (<code>river.drift.binary.DDM</code>, limiares padrão), com estado de warning nativo.</li>
+<li><strong>Oráculo</strong>: posições reais dos drifts (apenas sintéticas com drift pontual).</li>
+</ul>
+<p>No warning, guardam-se os índices das instâncias (até B_max = 2000). Warning falso (DDM sai do warning ou
+passam B_max instâncias sem drift) descarta o buffer. No drift, E = buffer ∪ instâncias pós-drift até
+|E| ≥ n_min = 100. As primeiras n_init = 500 instâncias usam pesos uniformes; em seguida o AG roda sobre elas
+("conceito 0"). Entre drifts a população fica congelada.</p>
+<h3>2.4 Estratégias pós-drift</h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>População inicial após o drift</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>S1</td>
+<td>30 indivíduos Dirichlet(1,…,1) (controle)</td>
+</tr>
+<tr>
+<td>S2</td>
+<td>população final anterior, intacta</td>
+</tr>
+<tr>
+<td>S3</td>
+<td>população anterior com os 30% piores trocados por aleatórios</td>
+</tr>
+<tr>
+<td>S4</td>
+<td>população anterior; σ = 0,5 nas 10 primeiras gerações, depois 0,1</td>
+</tr>
+<tr>
+<td>S5</td>
+<td>arquivo de memória (≤ 10) + melhores da população anterior</td>
+</tr>
+<tr>
+<td>S6</td>
+<td>memória + 30% aleatórios + melhores da população anterior</td>
+</tr>
+</tbody>
+</table>
+<p>Memória (S5/S6): no drift, antes de reotimizar, o melhor indivíduo atual entra no arquivo; com o arquivo
+cheio, substitui o membro mais próximo (distância euclidiana). Os membros são reavaliados no novo E.</p>
+<h3>2.5 Baselines e benchmarks</h3>
+<table>
+<thead>
+<tr>
+<th>ID</th>
+<th>Descrição</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B1</td>
+<td>Pesos uniformes</td>
+</tr>
+<tr>
+<td>B2</td>
+<td>AG congelado (só otimiza no conceito 0)</td>
+</tr>
+<tr>
+<td>B3</td>
+<td>Melhor modelo individual (oráculo a posteriori)</td>
+</tr>
+<tr>
+<td>B4</td>
+<td>Seleção online: modelo com melhor macro-F1 nas 500 instâncias anteriores</td>
+</tr>
+<tr>
+<td>B5</td>
+<td>w_m ∝ macro-F1 recente (500 inst.), recalculado a cada 100 instâncias</td>
+</tr>
+<tr>
+<td>B6</td>
+<td>Hedge, β = 0,9, atualização por instância</td>
+</tr>
+<tr>
+<td>B7</td>
+<td>Busca aleatória: mesmo gatilho e mesmo E, 1500 vetores Dirichlet</td>
+</tr>
+<tr>
+<td>B8</td>
+<td>DE/rand/1/bin, F = 0,5, CR = 0,9, warm start (S2), mesmo critério de parada</td>
+</tr>
+<tr>
+<td>—</td>
+<td>ARF (10 árvores), SRP (10 modelos), Leveraging Bagging (10 HT) — river</td>
+</tr>
+</tbody>
+</table>
+<h3>2.6 Bases de dados</h3>
+<table>
+<thead>
+<tr>
+<th>Stream</th>
+<th>Configuração</th>
+<th>Drift</th>
+<th>Classes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SEA-Rec</td>
+<td>variantes 0→1→2→3→0→1→2→3, 8×6.250, ruído 10%</td>
+<td>abrupto, recorrente</td>
+<td>2</td>
+</tr>
+<tr>
+<td>STAGGER-Rec</td>
+<td>funções 0→1→2→0→1→2, 6×5.000, 10% de ruído nos rótulos</td>
+<td>abrupto, recorrente</td>
+<td>2</td>
+</tr>
+<tr>
+<td>AGR-Abr</td>
+<td>funções 0→2→4→6→8, 5×10.000, perturbação 0,05</td>
+<td>abrupto, novo</td>
+<td>2</td>
+</tr>
+<tr>
+<td>AGR-Grad</td>
+<td>idem, transição de 2.000 instâncias</td>
+<td>gradual, novo</td>
+<td>2</td>
+</tr>
+<tr>
+<td>RBF-Inc</td>
+<td>RandomRBFDrift, 10 atributos, 50 centróides (25 móveis), velocidade 1e-4, 50k</td>
+<td>incremental</td>
+<td>5</td>
+</tr>
+<tr>
+<td>Elec2</td>
+<td>river.datasets.Elec2, 45.312 instâncias</td>
+<td>desconhecido (real)</td>
+<td>2</td>
+</tr>
+</tbody>
+</table>
+<h3>2.7 Protocolo</h3>
+<ul>
+<li>Avaliação prequencial; <strong>30 sementes</strong> por configuração (semente do gerador sintético, dos modelos e do AG).</li>
+<li>Viabilidade (Seção 10.5 da proposta): o pool roda uma vez por base × semente e as matrizes
+  P (n × 8 × C) ficam em cache; AG, estratégias, detectores e baselines são <em>replays</em> em numpy.</li>
+<li>Métricas: macro-F1 prequencial (acumulado e em janela de 1000), acurácia, kappa; tempo de recuperação
+  (instâncias até, depois do mínimo, o macro-F1 em janela voltar a 95% do nível pré-drift) e queda máxima;
+  curvas de convergência, gerações até 95% do ganho final, diversidade (distância média entre pares);
+  atraso, falsos alarmes e drifts perdidos do detector; tempo por instância e avaliações de fitness.</li>
+<li>Estatística: Friedman + Nemenyi com diagrama CD sobre as médias por base (Demšar, 2006); Wilcoxon pareado
+  nas 30 sementes com correção de Holm por base; Â12 de Vargha-Delaney.</li>
+</ul>
+<h3>2.8 Decisões de implementação e desvios em relação à proposta</h3>
+<table>
+<thead>
+<tr>
+<th>Item</th>
+<th>Decisão</th>
+<th>Motivo</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ADWIN só para aumento de erro</td>
+<td>Um sinal do ADWIN só conta como warning/drift se a média estimada <strong>subir</strong></td>
+<td>O ADWIN detecta mudança nas duas direções; a queda do erro logo após aplicar novos pesos não é concept drift e geraria reotimizações espúrias</td>
+</tr>
+<tr>
+<td>Reset do detector</td>
+<td>No drift (proposta) <strong>e</strong> quando os novos pesos são aplicados</td>
+<td>A troca de pesos muda a distribuição do erro monitorado</td>
+</tr>
+<tr>
+<td>Oráculo sem warning</td>
+<td>Drift exatamente na posição real; E = as n_min = 100 instâncias pós-drift</td>
+<td>A proposta não define warning para o oráculo; assim E contém só dados do novo conceito</td>
+</tr>
+<tr>
+<td>Orçamento</td>
+<td>AG: 30 + 28 por geração (elites não são reavaliadas), ≤ 1.402 avaliações; B7: 1.500</td>
+<td>Mantém a B7 com orçamento ≥ ao do AG (comparação conservadora para H2)</td>
+</tr>
+<tr>
+<td>Hedge</td>
+<td>Pesos em espaço logarítmico</td>
+<td>Evita <em>underflow</em> de β^erros em 50 mil instâncias; matematicamente idêntico</td>
+</tr>
+<tr>
+<td>B4/B5</td>
+<td>Janela de 500 instâncias estritamente passadas</td>
+<td>Evita vazamento; B5 recalculado a cada 100 instâncias</td>
+</tr>
+<tr>
+<td>Posições de drift do AGR-Grad</td>
+<td>≈ 10.000·i (ConceptDriftStream aninhado); a detecção casa com o drift em [d − 1000, d + 3000)</td>
+<td>A transição gradual de 2.000 instâncias começa antes do centro, daí atrasos negativos</td>
+</tr>
+<tr>
+<td>Pool</td>
+<td>Mantido sem substituições</td>
+<td>A discordância média entre pares (0,09–0,34) é baixa só no SEA-Rec, onde todos os modelos estão perto do erro de Bayes (10% de ruído); trocar o pool por base quebraria o controle</td>
+</tr>
+<tr>
+<td>Desbalanceamento do AGR</td>
+<td><code>balance_classes=False</code> gera ~52/48 no total</td>
+<td>O desbalanceamento é por conceito e modesto; o macro-F1 continua sendo a métrica</td>
+</tr>
+<tr>
+<td>INSECTS</td>
+<td><strong>Não incluído</strong></td>
+<td>O download exige obter os arquivos no repositório dos autores fora do <code>river</code>; aplicou-se o corte "uma base real" previsto na Seção 13 da proposta. O código aceita a base sem mudanças (basta um loader que gere o cache)</td>
+</tr>
+<tr>
+<td>CreditCard</td>
+<td>Não incluída</td>
+<td>Opcional na proposta</td>
+</tr>
+<tr>
+<td>Detector e sensibilidade</td>
+<td>Rodados para <strong>todas</strong> as seis estratégias, não só as duas melhores</td>
+<td>O replay custa ~0,5 s por execução, então ampliar a grade não teve custo relevante</td>
+</tr>
+<tr>
+<td>Sensibilidade</td>
+<td>Um fator por vez em torno do padrão, em SEA-Rec e AGR-Abr</td>
+<td>Grade fatorial completa desnecessária para robustez</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Ambiente:</strong> Python 3.14, river 0.27, numpy/scipy/pandas; 10 núcleos. O cache das matrizes P levou ~2 h
+(dominado pelo treino do pool e dos benchmarks); a grade completa de replays (9.360 execuções) levou menos de 10 minutos, o que confirma a viabilidade
+prevista na Seção 10.5 da proposta.</p>
+<h2>3. Resultados</h2>
+<p>Todas as tabelas completas (média ± desvio, acurácia, kappa, macro-F1 em janela, testes por base) estão em
+<code>docs/tables/</code> (também em <code>results/tables/</code>). Aqui apresentamos as médias de macro-F1 sobre 30 sementes.</p>
+<h3>3.1 Pool de modelos</h3>
+<table>
+<thead>
+<tr>
+<th>Base</th>
+<th>Melhor modelo individual</th>
+<th>macro-F1</th>
+<th>Pior modelo</th>
+<th>Discordância média</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SEA-Rec</td>
+<td>KNN</td>
+<td>0,841</td>
+<td>Softmax 0,781</td>
+<td>0,095</td>
+</tr>
+<tr>
+<td>STAGGER-Rec</td>
+<td>Hoeffding Adaptive Tree</td>
+<td>0,851</td>
+<td>AMF 0,458</td>
+<td>0,288</td>
+</tr>
+<tr>
+<td>AGR-Abr</td>
+<td>Hoeffding Adaptive Tree</td>
+<td>0,874</td>
+<td>AMF 0,615</td>
+<td>0,311</td>
+</tr>
+<tr>
+<td>AGR-Grad</td>
+<td>Hoeffding Adaptive Tree</td>
+<td>0,866</td>
+<td>AMF 0,615</td>
+<td>0,330</td>
+</tr>
+<tr>
+<td>RBF-Inc</td>
+<td>KNN</td>
+<td>0,910</td>
+<td>GaussianNB 0,476</td>
+<td>0,343</td>
+</tr>
+<tr>
+<td>Elec2</td>
+<td>Softmax</td>
+<td>0,845</td>
+<td>GaussianNB 0,699</td>
+<td>0,192</td>
+</tr>
+</tbody>
+</table>
+<p>O pool é diverso e heterogêneo: o melhor modelo muda conforme a base, e em todas as bases há modelos muito
+fracos. Por isso a ponderação importa (a média uniforme B1 fica 8,5 p.p. abaixo do KNN no RBF-Inc).</p>
+<h3>3.2 Desempenho preditivo (QP1, QP2)</h3>
+<p>Macro-F1 prequencial, média de 30 sementes. Em negrito, o melhor método de combinação do mesmo pool (S/B);
+os benchmarks estão à parte.</p>
+<table>
+<thead>
+<tr>
+<th>Base</th>
+<th>S1</th>
+<th>S2</th>
+<th>S3</th>
+<th>S4</th>
+<th>S5</th>
+<th>S6</th>
+<th>B1 Unif.</th>
+<th>B2 Cong.</th>
+<th>B3 Melhor</th>
+<th>B4 Sel.</th>
+<th>B5 Desemp.</th>
+<th>B6 Hedge</th>
+<th>B7 Aleat.</th>
+<th>B8 DE</th>
+<th>ARF</th>
+<th>SRP</th>
+<th>LB</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SEA-Rec</td>
+<td>.854</td>
+<td>.850</td>
+<td>.853</td>
+<td>.853</td>
+<td>.853</td>
+<td>.853</td>
+<td>.845</td>
+<td>.844</td>
+<td>.841</td>
+<td>.853</td>
+<td>.846</td>
+<td>.841</td>
+<td><strong>.855</strong></td>
+<td>.846</td>
+<td>.854</td>
+<td>.779</td>
+<td>.849</td>
+</tr>
+<tr>
+<td>STAGGER-Rec</td>
+<td>.795</td>
+<td>.785</td>
+<td>.792</td>
+<td>.802</td>
+<td>.785</td>
+<td>.789</td>
+<td>.812</td>
+<td>.770</td>
+<td>.851</td>
+<td><strong>.865</strong></td>
+<td>.832</td>
+<td>.851</td>
+<td>.799</td>
+<td>.778</td>
+<td>.893</td>
+<td>.887</td>
+<td>.782</td>
+</tr>
+<tr>
+<td>AGR-Abr</td>
+<td>.859</td>
+<td>.859</td>
+<td>.861</td>
+<td>.850</td>
+<td>.861</td>
+<td>.866</td>
+<td>.849</td>
+<td>.825</td>
+<td>.874</td>
+<td><strong>.889</strong></td>
+<td>.863</td>
+<td>.874</td>
+<td>.861</td>
+<td>.836</td>
+<td>.893</td>
+<td>.864</td>
+<td>.801</td>
+</tr>
+<tr>
+<td>AGR-Grad</td>
+<td>.868</td>
+<td>.849</td>
+<td>.863</td>
+<td>.865</td>
+<td>.849</td>
+<td>.863</td>
+<td>.841</td>
+<td>.814</td>
+<td>.866</td>
+<td><strong>.885</strong></td>
+<td>.858</td>
+<td>.866</td>
+<td>.864</td>
+<td>.830</td>
+<td>.874</td>
+<td>.833</td>
+<td>.890</td>
+</tr>
+<tr>
+<td>RBF-Inc</td>
+<td>.909</td>
+<td>.909</td>
+<td>.909</td>
+<td>.909</td>
+<td>.909</td>
+<td>.909</td>
+<td>.824</td>
+<td>.909</td>
+<td><strong>.910</strong></td>
+<td>.910</td>
+<td>.861</td>
+<td>.910</td>
+<td>.909</td>
+<td>.909</td>
+<td>.755</td>
+<td>.812</td>
+<td>.819</td>
+</tr>
+<tr>
+<td>Elec2</td>
+<td>.862</td>
+<td><strong>.866</strong></td>
+<td>.864</td>
+<td>.862</td>
+<td>.865</td>
+<td>.863</td>
+<td>.841</td>
+<td>.859</td>
+<td>.845</td>
+<td>.857</td>
+<td>.851</td>
+<td>.847</td>
+<td>.862</td>
+<td>.865</td>
+<td>.877</td>
+<td>.862</td>
+<td>.882</td>
+</tr>
+</tbody>
+</table>
+<p><img alt="Diagrama CD — S1–S6 e B1–B8" src="figures/cd_all.png" /></p>
+<p><strong>Friedman/Nemenyi (N = 6 bases, k = 14):</strong> p = 0,051 e CD = 8,10. Ranks médios: B4 3,67 · B7 5,17 · B6 5,83 ·
+S6 6,17 · B3 6,17 · S4 6,33 · S1 7,00 · S3 7,67 · S2 8,00 · S5 8,17 · B5 8,67 · B8 9,17 · B1 11,33 · B2 11,67.
+Com só seis bases o teste não tem poder para separar métodos vizinhos; as comparações pareadas por base, a
+seguir, são mais informativas.</p>
+<p><strong>Wilcoxon pareado (30 sementes, Holm por base), S6 = melhor estratégia por rank:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Comparação</th>
+<th>Vitórias / empates / derrotas nas 6 bases</th>
+<th>Leitura</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>S6 vs B1 (uniforme)</td>
+<td><strong>5 / 0 / 1</strong></td>
+<td>O AG supera a média simples (Â12 ≥ 0,84 em 4 bases); a exceção é o STAGGER</td>
+</tr>
+<tr>
+<td>S6 vs B2 (AG congelado)</td>
+<td><strong>3 / 3 / 0</strong></td>
+<td>A reotimização dinâmica nunca piora e ganha muito em AGR (+4–5 p.p.)</td>
+</tr>
+<tr>
+<td>S6 vs B5 (pond. por desempenho)</td>
+<td>3 / 2 / 1</td>
+<td></td>
+</tr>
+<tr>
+<td>S6 vs B6 (Hedge)</td>
+<td>2 / 3 / 1</td>
+<td>Ganha em SEA e Elec2, perde em STAGGER</td>
+</tr>
+<tr>
+<td>S6 vs B8 (DE)</td>
+<td>3 / 3 / 0</td>
+<td>O AG supera a DE com warm start</td>
+</tr>
+<tr>
+<td>S6 vs B4 (seleção online)</td>
+<td>1 / 2 / <strong>3</strong></td>
+<td>B4 vence em STAGGER, AGR-Abr e AGR-Grad</td>
+</tr>
+<tr>
+<td><strong>S6 vs B7 (busca aleatória)</strong></td>
+<td><strong>0 / 6 / 0</strong></td>
+<td>Nenhuma diferença significativa</td>
+</tr>
+<tr>
+<td><strong>S1 vs B7</strong></td>
+<td><strong>0 / 6 / 0</strong></td>
+<td>Idem para o AG com reinício</td>
+</tr>
+</tbody>
+</table>
+<h3>3.3 Reação ao drift e comportamento evolucionário (QP3)</h3>
+<table>
+<thead>
+<tr>
+<th>Estratégia</th>
+<th>Melhor fitness na geração 0</th>
+<th>Fitness final</th>
+<th>Gerações até 95% do ganho</th>
+<th>Gerações executadas</th>
+<th>Diversidade inicial</th>
+<th>Recuperação (inst.)</th>
+<th>Queda máx.</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>S1 Reinício</td>
+<td><strong>0,694</strong></td>
+<td>0,755</td>
+<td>9,9</td>
+<td>20,7</td>
+<td>0,425</td>
+<td>2.848</td>
+<td>0,145</td>
+</tr>
+<tr>
+<td>S2 Warm start</td>
+<td>0,658</td>
+<td>0,732</td>
+<td>11,1</td>
+<td>22,1</td>
+<td>0,141</td>
+<td>2.847</td>
+<td>0,152</td>
+</tr>
+<tr>
+<td>S3 WS + imigrantes</td>
+<td>0,682</td>
+<td>0,750</td>
+<td>9,9</td>
+<td>20,5</td>
+<td>0,335</td>
+<td>2.841</td>
+<td>0,146</td>
+</tr>
+<tr>
+<td>S4 WS + hipermutação</td>
+<td>0,657</td>
+<td><strong>0,764</strong></td>
+<td>9,7</td>
+<td>21,0</td>
+<td>0,145</td>
+<td><strong>2.716</strong></td>
+<td><strong>0,128</strong></td>
+</tr>
+<tr>
+<td>S5 Memória</td>
+<td>0,670</td>
+<td>0,737</td>
+<td>10,1</td>
+<td>21,0</td>
+<td>0,183</td>
+<td>2.853</td>
+<td>0,152</td>
+</tr>
+<tr>
+<td>S6 Memória + imigrantes</td>
+<td>0,692</td>
+<td>0,754</td>
+<td>9,8</td>
+<td>20,5</td>
+<td>0,379</td>
+<td>2.727</td>
+<td>0,138</td>
+</tr>
+</tbody>
+</table>
+<p><img alt="Curvas de convergência" src="figures/convergence.png" /></p>
+<p><img alt="Diversidade" src="figures/diversity.png" /></p>
+<ul>
+<li>O warm start <strong>não</strong> parte de um ponto melhor: a população anterior convergiu para o conceito que terminou
+  (diversidade ≈ 0,14 contra 0,43 de uma população Dirichlet), e por isso o melhor indivíduo da geração 0 é
+  <em>pior</em> que o de uma população aleatória.</li>
+<li>Gerações até 95% do ganho e tempo de recuperação <strong>não diferem</strong> de S1 em nenhuma base (Wilcoxon + Holm;
+  tabela <code>h3_wilcoxon</code>), exceto no SEA-Rec, onde S2 precisa de <strong>mais</strong> gerações (+4,2; p = 0,002).</li>
+<li>As estratégias com injeção de diversidade (S3, S6) ou exploração temporária (S4) ficam no grupo de
+  melhor fitness final e menor queda.</li>
+</ul>
+<h3>3.4 Estratégia por tipo de drift (QP4)</h3>
+<table>
+<thead>
+<tr>
+<th>Grupo</th>
+<th>Melhor rank médio (base × semente)</th>
+<th>Pior</th>
+<th>Observação</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Recorrente (SEA, STAGGER)</td>
+<td><strong>S4</strong> (3,13), S6 (3,35), S1 (3,38)</td>
+<td>S2 (4,10)</td>
+<td>A memória pura (S5) fica em 5º; H4a não se confirma</td>
+</tr>
+<tr>
+<td>Novo (AGR-Abr, AGR-Grad)</td>
+<td><strong>S3</strong> (3,08), S1 (3,12), S6 (3,17)</td>
+<td>S5 (4,05)</td>
+<td>Imigrantes ajudam; a memória atrapalha (S5 &lt; S1 no AGR-Grad com p = 0,002)</td>
+</tr>
+<tr>
+<td>Incremental (RBF-Inc)</td>
+<td>todas ≈ 0,909</td>
+<td>—</td>
+<td>O ADWIN quase não dispara (0,07 drifts por execução), então o AG equivale ao congelado</td>
+</tr>
+<tr>
+<td>Real (Elec2)</td>
+<td><strong>S2</strong> (2,53), S5 (2,83)</td>
+<td>S1 (4,43)</td>
+<td>Transferência ajuda: S2 e S5 &gt; S1 com significância (Â12 ≈ 0,71–0,74)</td>
+</tr>
+</tbody>
+</table>
+<p><img alt="macro-F1 ao longo do tempo" src="figures/macro_f1_over_time.png" /></p>
+<h3>3.5 Detector (QP5)</h3>
+<table>
+<thead>
+<tr>
+<th>Base</th>
+<th>ADWIN (média S1–S6)</th>
+<th>DDM</th>
+<th>Oráculo</th>
+<th>Oráculo − ADWIN</th>
+<th>Amplitude entre detectores</th>
+<th>Amplitude entre estratégias</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SEA-Rec</td>
+<td>0,853</td>
+<td>0,847</td>
+<td>0,855</td>
+<td>+0,003</td>
+<td>0,008</td>
+<td>0,005</td>
+</tr>
+<tr>
+<td>STAGGER-Rec</td>
+<td>0,791</td>
+<td><strong>0,815</strong></td>
+<td>0,763</td>
+<td><strong>−0,029</strong></td>
+<td><strong>0,052</strong></td>
+<td>0,013</td>
+</tr>
+<tr>
+<td>AGR-Abr</td>
+<td>0,859</td>
+<td>0,858</td>
+<td>0,847</td>
+<td>−0,012</td>
+<td>0,014</td>
+<td>0,014</td>
+</tr>
+<tr>
+<td>AGR-Grad</td>
+<td>0,860</td>
+<td>0,863</td>
+<td>0,847</td>
+<td>−0,012</td>
+<td>0,017</td>
+<td>0,012</td>
+</tr>
+</tbody>
+</table>
+<table>
+<thead>
+<tr>
+<th>Base</th>
+<th>Detector</th>
+<th>Detecções</th>
+<th>Atraso médio</th>
+<th>Falsos alarmes</th>
+<th>Drifts perdidos</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SEA-Rec (7 drifts)</td>
+<td>ADWIN / DDM</td>
+<td>4,4 / 3,3</td>
+<td>644 / 929</td>
+<td>0,1 / 2,0</td>
+<td>2,7 / 5,7</td>
+</tr>
+<tr>
+<td>STAGGER-Rec (5)</td>
+<td>ADWIN / DDM</td>
+<td>4,9 / 7,0</td>
+<td>85 / 221</td>
+<td>0,2 / 2,8</td>
+<td>0,3 / 0,8</td>
+</tr>
+<tr>
+<td>AGR-Abr (4)</td>
+<td>ADWIN / DDM</td>
+<td>2,6 / 3,0</td>
+<td>70 / 213</td>
+<td>0,0 / 1,1</td>
+<td>1,4 / 2,1</td>
+</tr>
+<tr>
+<td>AGR-Grad (4)</td>
+<td>ADWIN / DDM</td>
+<td>4,3 / 6,2</td>
+<td>−360 / −176</td>
+<td>1,5 / 3,6</td>
+<td>1,1 / 1,4</td>
+</tr>
+<tr>
+<td>RBF-Inc (incremental)</td>
+<td>ADWIN / DDM</td>
+<td>0,1 / 1,6</td>
+<td>—</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>O detector importa mais que a estratégia em 3 das 4 bases (amplitude entre detectores ≥ amplitude entre
+estratégias), mas <strong>não pelo atraso</strong>: o oráculo, com atraso zero, é o <em>pior</em> detector em STAGGER e AGR, e o
+DDM, com mais falsos alarmes, é o melhor no STAGGER.</p>
+<p><img alt="Pesos evoluídos" src="figures/weights.png" /></p>
+<h3>3.6 Sensibilidade</h3>
+<table>
+<thead>
+<tr>
+<th>Fator</th>
+<th>Valores (macro-F1 médio S1–S6; AGR-Abr / SEA-Rec)</th>
+<th>Padrão</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>N</td>
+<td>10: .854/.851 · 50: .851/.853</td>
+<td>30: .859/.853</td>
+</tr>
+<tr>
+<td>G</td>
+<td>20: .859/.853 · 100: .859/.853</td>
+<td>50: .859/.853</td>
+</tr>
+<tr>
+<td>n_min</td>
+<td>50: .852/.852 · <strong>200: .863/.854</strong></td>
+<td>100: .859/.853</td>
+</tr>
+<tr>
+<td>Taxa de imigrantes</td>
+<td>0,1: .858/.853 · 0,5: .857/.853</td>
+<td>0,3: .859/.853</td>
+</tr>
+<tr>
+<td>Sobreviventes</td>
+<td>(μ+λ): .852/.853</td>
+<td>geracional: .859/.853</td>
+</tr>
+</tbody>
+</table>
+<p><img alt="Sensibilidade" src="figures/sensitivity.png" /></p>
+<p>Os parâmetros do AG (N, G, imigrantes) quase não mudam o resultado. O fator com maior efeito é <strong>n_min</strong>, ou
+seja, o tamanho do conjunto de avaliação. Com o esquema (μ+λ), que perde diversidade, o AGR-Abr cai 0,7 p.p.,
+o que confirma a escolha geracional.</p>
+<h3>3.7 Custo</h3>
+<p>O custo por instância é ~1,8 ms, dominado pelo pool de 8 modelos; o replay do AG acrescenta &lt; 0,02 ms por
+instância. Cada stream consome ~3.500 avaliações de fitness (≈ 5 otimizações), contra ~9.200 da busca
+aleatória (B7), que nunca para por estagnação. ARF, SRP e LB custam 0,17–0,26 ms por instância.</p>
+<h2>4. Discussão</h2>
+<h3>4.1 Situação das hipóteses</h3>
+<table>
+<thead>
+<tr>
+<th>Hipótese</th>
+<th>Veredito</th>
+<th>Evidência</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>H1</strong> AG &gt; uniforme, ponderação por desempenho e Hedge</td>
+<td><strong>Parcialmente confirmada</strong></td>
+<td>Vence B1 em 5/6 bases, B5 em 3/6 e B6 em 2/6, mas perde em todas no STAGGER-Rec e perde para a seleção online (B4) em 3 bases</td>
+</tr>
+<tr>
+<td><strong>H2</strong> AG &gt; busca aleatória com o mesmo orçamento</td>
+<td><strong>Refutada</strong></td>
+<td>0/6/0 para S1 e S6 vs B7; Â12 entre 0,40 e 0,62</td>
+</tr>
+<tr>
+<td><strong>H3</strong> Warm start converge mais rápido e recupera melhor</td>
+<td><strong>Refutada</strong></td>
+<td>A geração 0 do warm start é pior que a aleatória; gerações e recuperação iguais a S1; S2 precisa de mais gerações no SEA-Rec</td>
+</tr>
+<tr>
+<td><strong>H4a</strong> Memória vence em drift recorrente</td>
+<td><strong>Refutada</strong></td>
+<td>S5 fica em 5º no grupo recorrente; o melhor é S4 (diferenças não significativas)</td>
+</tr>
+<tr>
+<td><strong>H4b</strong> Imigrantes/hipermutação vencem em drift novo</td>
+<td><strong>Fracamente apoiada</strong></td>
+<td>S3 e S6 lideram o grupo novo e a memória pura é a pior, mas sem significância contra S1</td>
+</tr>
+<tr>
+<td><strong>H5</strong> Detector real × oráculo dominado pelo atraso</td>
+<td><strong>Refutada na forma, confirmada na essência</strong></td>
+<td>O detector pesa mais que a estratégia, mas o oráculo (atraso 0) é pior; o fator decisivo é <em>quando</em> e <em>com quais dados</em> se reotimiza</td>
+</tr>
+</tbody>
+</table>
+<h3>4.2 Por que o operador evolucionário não faz diferença (H2)</h3>
+<p>O problema de otimização em cada drift é <strong>pequeno e ruidoso</strong>: 8 dimensões, um simplex, e uma fitness
+calculada sobre 100 a 400 instâncias (|E| médio por base: 104 a 374). O macro-F1 sobre poucos exemplos é uma
+função em degraus com grandes platôs: muitos vetores de pesos produzem exatamente as mesmas predições. Com
+1.500 amostras Dirichlet, a busca aleatória já alcança um ponto do platô ótimo, e o AG não tem gradiente de
+fitness para explorar. Além disso, o ótimo em E (de ~100 instâncias) <strong>sobreajusta</strong>. O ganho médio sobre os
+pesos antigos <em>dentro</em> de E é grande (+0,09 a +0,16 de macro-F1), mas se traduz em ganhos prequenciais de
+apenas ~1 p.p. Ou seja, o gargalo é estatístico (variância da estimativa da fitness), não de busca.</p>
+<h3>4.3 Por que reaproveitar a população não ajuda (H3, H4)</h3>
+<p>Duas razões aparecem nos dados:</p>
+<ol>
+<li><strong>Convergência destrói a diversidade que seria transferida.</strong> Ao fim de cada otimização a população tem
+   diversidade ≈ 0,14 (figura de diversidade). A população do warm start é um aglomerado em torno do ótimo
+   antigo, e numa paisagem que mudou isso é pior que uma amostra aleatória do simplex. É o problema clássico
+   de perda de diversidade em EAs dinâmicos (Nguyen, Yang &amp; Branke, 2012), e as estratégias que reinjetam
+   diversidade (S3, S6, S4) se recuperam melhor que S2 e S5.</li>
+<li><strong>A recorrência dos conceitos não implica recorrência dos pesos.</strong> No SEA-Rec e no STAGGER-Rec o conceito
+   0 volta, mas os modelos do pool <strong>continuam aprendendo</strong>: quando o conceito reaparece, o KNN, as árvores e o
+   AMF estão em estados diferentes, e o vetor de pesos ótimo do primeiro episódio já não é o mesmo
+   (figura de pesos). A memória guarda soluções de um ambiente que não se repete exatamente. Isso explica
+   H4a refutada e a vantagem da memória e do warm start no <strong>Elec2</strong>, onde os drifts são frequentes
+   (~12 reotimizações) e pequenos: o ótimo muda pouco entre eventos e a transferência simples paga.</li>
+</ol>
+<h3>4.4 Pesos congelados entre drifts e o papel do detector (H5)</h3>
+<p>A figura de macro-F1 no tempo mostra o principal limite do desenho: <strong>a população fica congelada entre
+drifts</strong>, mas o desempenho relativo dos modelos muda <em>dentro</em> de cada conceito. Logo após um drift, os
+modelos de janela curta (KNN) estão bons e as árvores ainda não se recompuseram; algumas centenas de
+instâncias depois, o quadro se inverte. O AG escolhe pesos ótimos para as primeiras ~100 instâncias pós-drift
+e os mantém por 5.000 a 10.000 instâncias. Isso explica três resultados:</p>
+<ul>
+<li><strong>Oráculo &lt; ADWIN &lt; DDM no STAGGER:</strong> o oráculo reotimiza exatamente uma vez por conceito, enquanto os
+  "falsos alarmes" e as detecções atrasadas do DDM disparam reotimizações adicionais, quando os modelos já se
+  readaptaram. O erro do detector funciona como uma reavaliação periódica involuntária.</li>
+<li><strong>B4 (seleção online, janela de 500) é o melhor método de combinação:</strong> ele se readapta <em>continuamente</em>,
+  sem depender de detector.</li>
+<li><strong>n_min = 200 melhora o resultado</strong>: com mais dados em E, a estimativa da fitness tem menos variância e
+  representa melhor o restante do conceito.</li>
+</ul>
+<p>No RBF-Inc (drift incremental) o ADWIN quase nunca dispara, e o AG se reduz ao AG congelado. Como o AG
+inicial já encontra o KNN (o melhor modelo), o resultado é bom, mas por acaso do pool e não por adaptação.</p>
+<h3>4.5 Comparação com o estado da arte</h3>
+<p>O ARF é o melhor método global (rank 4,33 entre 17), sobretudo no STAGGER (0,893), onde substitui árvores
+com drift. O Leveraging Bagging vence no AGR-Grad e no Elec2. Esses métodos têm adaptação interna (troca de
+membros), algo que nosso desenho exclui de propósito, já que o pool nunca é substituído. Ainda assim, o
+ensemble ponderado pelo AG supera o SRP em 4 das 6 bases e o LB em 3, e no RBF-Inc fica 9 a 15 p.p. acima dos
+três benchmarks.</p>
+<h3>4.6 Ameaças à validade</h3>
+<ul>
+<li><strong>Poder estatístico entre bases:</strong> com N = 6 bases, o Friedman tem pouco poder (CD = 8,1 para 14 métodos).
+  Por isso apoiamos as conclusões nos testes pareados por base, com 30 sementes.</li>
+<li><strong>Bases reais:</strong> só o Elec2 (INSECTS não foi incluído), e a conclusão "transferência ajuda em dados reais"
+  depende de uma única base.</li>
+<li><strong>Escolhas de implementação</strong> (ADWIN só para aumento, reset após nova aplicação de pesos, oráculo sem
+  warning) afetam a frequência de reotimização, o fator que se mostrou decisivo.</li>
+<li><strong>Pool fixo:</strong> a heterogeneidade do pool (um modelo dominante por base) favorece métodos de <em>seleção</em>
+  (B3, B4) sobre métodos de <em>combinação</em>.</li>
+</ul>
+<h2>5. Conclusões e trabalhos futuros</h2>
+<p>Formulamos a ponderação de ensembles online como um problema de otimização dinâmica e comparamos, de forma
+controlada (30 sementes, 6 bases, mesmos pool e gatilho), seis mecanismos clássicos de EAs dinâmicos. As
+conclusões, em ordem de importância:</p>
+<ol>
+<li><strong>Reotimizar os pesos no drift vale a pena</strong> frente à média uniforme e ao AG congelado (ganhos de até
+   8,5 p.p.), mas um esquema contínuo e simples (seleção do melhor modelo recente) é tão bom ou melhor.</li>
+<li><strong>O AG não supera a busca aleatória com o mesmo orçamento.</strong> No simplex de dimensão 8, com fitness
+   estimada em ~100–400 instâncias, o limite é a variância da fitness, não a capacidade de busca.</li>
+<li><strong>As seis estratégias pós-drift são equivalentes.</strong> O warm start herda uma população sem diversidade, e a
+   memória guarda pesos de um "ambiente" que não volta igual porque os modelos continuam aprendendo. As
+   estratégias com diversidade (S3/S6/S4) ficam ligeiramente à frente nos sintéticos, e a transferência
+   (S2/S5) ganha com significância no Elec2, onde os drifts são frequentes e pequenos.</li>
+<li><strong>O desempenho depende de quando e com quais dados se reotimiza</strong> (detector, n_min) mais que da
+   estratégia evolucionária. O oráculo perfeito é pior que um detector ruidoso, porque reotimizar só uma vez
+   por conceito ignora a readaptação dos modelos.</li>
+</ol>
+<p>Em relação à pergunta de ligação com o seminário (<em>quanto a transferência simples já resolve?</em>): neste
+problema ela <strong>resolve pouco</strong>, porque a dificuldade não está em encontrar o ótimo de cada ambiente, mas em
+estimá-lo. Isso torna os <strong>surrogates com processos gaussianos</strong> ainda mais interessantes, não para
+economizar avaliações (que já são baratas), mas para <strong>modelar a incerteza da fitness</strong> e a correlação entre
+ambientes.</p>
+<p><strong>Trabalhos futuros</strong>, priorizados pelos achados:
+(a) <strong>evolução contínua entre drifts</strong>, com reotimizações periódicas ou disparadas pela queda da fitness do
+melhor indivíduo em uma janela deslizante, que ataca diretamente a limitação da Seção 4.4;
+(b) fitness com regularização ou validação cruzada dentro de E (ou E com pesos temporais) para reduzir o
+sobreajuste;
+(c) surrogates GP com transferência entre ambientes;
+(d) substituição de modelos após o drift;
+(e) inclusão do INSECTS para testar H4 com recorrência real.</p>
+<h2>Referências</h2>
+<p>Agrawal, Imielinski &amp; Swami (1993); Bifet &amp; Gavaldà (2007); Bifet, Holmes &amp; Pfahringer (2010); Branke (1999);
+Cobb (1990); Demšar (2006); Eshelman &amp; Schaffer (1993); Freund &amp; Schapire (1997); Gama et al. (2004);
+Gomes et al. (2017, 2019); Grefenstette (1992); Harries (1999); Kolter &amp; Maloof (2007); Montiel et al. (2021);
+Nguyen, Yang &amp; Branke (2012); Schlimmer &amp; Granger (1986); Souza et al. (2020); Storn &amp; Price (1997);
+Street &amp; Kim (2001); Vargha &amp; Delaney (2000). Referências completas na proposta (<code>Proposta_Projeto_CE.pdf</code>).</p></body></html>
