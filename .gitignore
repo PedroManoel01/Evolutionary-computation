@@ -37,3 +37,7 @@ Thumbs.db
 
 # Weights & Biases
 wandb/
+
+# Local docs & pilot script
+Proposta_Projeto_CE.pdf
+scripts/pilot_baselines.py
