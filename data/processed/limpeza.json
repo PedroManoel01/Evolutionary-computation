@@ -1,0 +1,56 @@
+{
+  "arquivos": [
+    "INMET_NE_PE_A301_RECIFE_01-01-2015_A_31-12-2015.CSV",
+    "INMET_NE_PE_A301_RECIFE_01-01-2016_A_31-12-2016.CSV",
+    "INMET_NE_PE_A301_RECIFE_01-01-2017_A_31-12-2017.CSV",
+    "INMET_NE_PE_A301_RECIFE_01-01-2018_A_31-12-2018.CSV",
+    "INMET_NE_PE_A301_RECIFE_01-01-2019_A_31-12-2019.CSV",
+    "INMET_NE_PE_A301_RECIFE_01-01-2020_A_31-12-2020.CSV",
+    "INMET_NE_PE_A301_RECIFE_01-01-2021_A_31-12-2021.CSV",
+    "INMET_NE_PE_A301_RECIFE_01-01-2022_A_31-12-2022.CSV",
+    "INMET_NE_PE_A301_RECIFE_01-01-2023_A_31-12-2023.CSV"
+  ],
+  "linhas_brutas": 78888,
+  "horas_na_grade": 78888,
+  "faltantes_por_variavel_pct": {
+    "chuva": 25.61,
+    "pressao": 25.53,
+    "pressao_max": 25.56,
+    "pressao_min": 25.56,
+    "radiacao": 59.32,
+    "temp": 25.53,
+    "orvalho": 26.69,
+    "temp_max": 25.56,
+    "temp_min": 25.56,
+    "orvalho_max": 26.76,
+    "orvalho_min": 26.76,
+    "umid_max": 26.75,
+    "umid_min": 26.76,
+    "umid": 26.69,
+    "vento_dir": 40.18,
+    "rajada": 40.25,
+    "vento_vel": 40.17
+  },
+  "faltantes_por_ano_pct": {
+    "2015": 1.4,
+    "2016": 3.2,
+    "2017": 6.1,
+    "2018": 5.4,
+    "2019": 0.1,
+    "2020": 0.1,
+    "2021": 14.5,
+    "2022": 100.0,
+    "2023": 100.0
+  },
+  "anos_sem_dados": [
+    2022,
+    2023
+  ],
+  "linhas_descartadas_por_lacuna": 3552,
+  "linhas_finais": 57816,
+  "prevalencia_chuva": 0.1327,
+  "periodo": [
+    "2015-01-01 03:00:00",
+    "2021-11-12 05:00:00"
+  ]
+}
