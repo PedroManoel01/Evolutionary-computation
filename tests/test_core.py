@@ -6,8 +6,15 @@ from sklearn.metrics import f1_score
 
 from src.evaluation.metrics import detector_metrics, drift_reaction, macro_f1, windowed_macro_f1
 from src.evaluation.objectives import macro_f1_batch, repair_simplex
-from src.evaluation.replay import ReplayConfig, rolling_model_f1, run_online_baseline, run_triggered
-from src.evolution.ga import DifferentialEvolution, GAConfig, GeneticAlgorithm, RandomSearch, random_simplex
+from src.evaluation.replay import (
+    ReplayConfig,
+    rolling_model_f1,
+    run_dase_replay,
+    run_deto_replay,
+    run_online_baseline,
+    run_triggered,
+)
+from src.evolution import DE_STRATEGIES, DEConfig, DifferentialEvolution, GAConfig, GeneticAlgorithm, RandomSearch, random_simplex
 from src.strategies.post_drift import MemoryArchive, PostDriftStrategy
 
 
@@ -122,3 +129,91 @@ def test_replay_runs_and_reacts():
     assert np.argmax(out.weights_final) == 1
     for b in ["B1", "B3", "B4", "B5", "B6"]:
         assert len(run_online_baseline(b, P, y)["y_hat"]) == n
+
+
+@pytest.mark.parametrize("strategy", sorted(DE_STRATEGIES))
+def test_de_strategies_stay_in_simplex_and_improve(strategy):
+    rng = np.random.default_rng(10)
+    n, M, C = 400, 8, 3
+    y = rng.integers(0, C, size=n)
+    P = rng.dirichlet(np.ones(C), size=(n, M))
+    P[:, 2, :] = 0.05
+    P[np.arange(n), 2, y] = 0.9
+    fit = lambda pop: macro_f1_batch(pop, P, y)  # noqa: E731
+
+    opt = DifferentialEvolution(DEConfig(strategy=strategy, dither=(strategy == "rand/1/bin")))
+    res = opt.run(random_simplex(30, M, rng), fit, rng)
+    assert np.allclose(res.pop.sum(1), 1.0) and (res.pop >= 0).all()
+    assert res.best_fit >= res.init_best_fit
+    assert res.n_evals <= 1500
+    assert res.best_fit > 0.9
+
+
+def test_de_hypermutation_escapes_collapsed_population():
+    rng = np.random.default_rng(11)
+    n, M, C = 400, 6, 2
+    y = rng.integers(0, C, size=n)
+    P = rng.dirichlet(np.ones(C), size=(n, M))
+    P[:, 0, :] = 0.5                      # modelo 0 virou ruído após drift
+    P[:, 4, :] = 0.05
+    P[np.arange(n), 4, y] = 0.95          # modelo 4 é o novo melhor
+    fit = lambda pop: macro_f1_batch(pop, P, y)  # noqa: E731
+
+    # População warm-start totalmente colapsada no modelo 0
+    collapsed = np.zeros((30, M))
+    collapsed[:, 0] = 1.0
+    res = DifferentialEvolution(DEConfig()).run(collapsed, fit, rng, hypermutation=True)
+    assert np.allclose(res.pop.sum(1), 1.0) and (res.pop >= 0).all()
+    assert res.best_fit > 0.9
+    assert int(np.argmax(res.best)) == 4
+
+
+def test_replay_with_de_optimizer():
+    rng = np.random.default_rng(12)
+    n, M, C = 6000, 4, 2
+    y = rng.integers(0, C, n)
+    P = np.full((n, M, C), 0.5)
+    good = np.where(np.arange(n) < 3000, 0, 1)
+    for t in range(n):
+        P[t, good[t], :] = 0.1
+        P[t, good[t], y[t]] = 0.9
+        P[t, 2, :] = rng.dirichlet([1, 1])
+    cfg = ReplayConfig(
+        strategy="S4",
+        detector="oracle",
+        optimizer="de",
+        de=DEConfig(strategy="current-to-best/1/bin"),
+    )
+    out = run_triggered(P, y, [3000], cfg, seed=0)
+    assert len(out.events) == 2
+    assert np.argmax(out.weights_final) == 1
+
+
+def test_deto_and_dase_replay_smoke():
+    rng = np.random.default_rng(13)
+    n, M, C = 1600, 4, 2
+    y = rng.integers(0, C, n)
+    P = np.full((n, M, C), 0.5)
+    good = np.where(np.arange(n) < 800, 0, 1)
+    for t in range(n):
+        P[t, good[t], :] = 0.1
+        P[t, good[t], y[t]] = 0.9
+        P[t, 2, :] = rng.dirichlet([1, 1])
+
+    out_deto = run_deto_replay(
+        P, y, [800], n_init=300, n_min=100, detector="oracle",
+        deto_n_init=4, deto_n_iter=2, seed=0,
+    )
+    assert len(out_deto.y_hat) == n
+    assert len(out_deto.events) == 2
+    assert out_deto.n_evals > 0
+
+    out_dase = run_dase_replay(
+        P, y, n_init=300, chunk_interval=600, window_size=200,
+        chunk_size=12, pop_size=12, max_iter=3, seed=0,
+    )
+    assert len(out_dase.y_hat) == n
+    assert len(out_dase.events) >= 2
+    assert out_dase.n_evals > 0
+
+

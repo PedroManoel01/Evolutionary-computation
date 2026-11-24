@@ -35,6 +35,7 @@ from src.evaluation.metrics import (  # noqa: E402
     windowed_macro_f1,
 )
 from src.evaluation.replay import ReplayConfig, run_online_baseline, run_triggered  # noqa: E402
+from src.evolution.de import DE_STRATEGIES, DEConfig  # noqa: E402
 from src.evolution.ga import GAConfig  # noqa: E402
 
 DATASETS = ["SEA-Rec", "STAGGER-Rec", "AGR-Abr", "AGR-Grad", "RBF-Inc", "Elec2"]
@@ -45,23 +46,29 @@ TRANSITION = {"AGR-Grad": 2000}
 CURVE_STEP = 100
 
 
-def sensitivity_grid() -> List[Tuple[str, Any, Dict[str, Any]]]:
+def sensitivity_grid(optimizer: str = "ga") -> List[Tuple[str, Any, Dict[str, Any]]]:
     g: List[Tuple[str, Any, Dict[str, Any]]] = []
+    opt_key = "de" if optimizer == "de" else "ga"
     for N in (10, 50):
-        g.append(("N", N, {"ga": {"pop_size": N}}))
+        g.append(("N", N, {opt_key: {"pop_size": N}}))
     for G in (20, 100):
-        g.append(("G", G, {"ga": {"max_gens": G}}))
+        g.append(("G", G, {opt_key: {"max_gens": G}}))
     for nm in (50, 200):
         g.append(("n_min", nm, {"n_min": nm}))
     for ir in (0.1, 0.5):
         g.append(("immigrant_rate", ir, {"immigrant_rate": ir}))
-    g.append(("survivor", "mu+lambda", {"ga": {"survivor": "mu+lambda"}}))
+    if optimizer == "de":
+        for strat in ("best/1/bin", "current-to-best/1/bin"):
+            g.append(("de_strategy", strat, {"de": {"strategy": strat}}))
+    else:
+        g.append(("survivor", "mu+lambda", {"ga": {"survivor": "mu+lambda"}}))
     return g
 
 
 def _cfg(**kw: Any) -> ReplayConfig:
     ga_kw = kw.pop("ga", {})
-    return ReplayConfig(ga=GAConfig(**ga_kw), **kw)
+    de_kw = kw.pop("de", {})
+    return ReplayConfig(ga=GAConfig(**ga_kw), de=DEConfig(**de_kw), **kw)
 
 
 def _summarize(y: np.ndarray, y_hat: np.ndarray, C: int, drifts: List[int], wf1: np.ndarray) -> Dict[str, Any]:
@@ -71,7 +78,14 @@ def _summarize(y: np.ndarray, y_hat: np.ndarray, C: int, drifts: List[int], wf1:
     return row
 
 
-def job(dataset: str, seed: int, blocks: List[str]) -> Dict[str, Any]:
+def job(
+    dataset: str,
+    seed: int,
+    blocks: List[str],
+    optimizer: str = "ga",
+    de_kwargs: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    de_base = dict(de_kwargs or {})
     P, y, bench, meta = load_cache(dataset, seed)
     n, M, C = P.shape
     drifts = list(meta["drift_positions"])
@@ -122,7 +136,11 @@ def job(dataset: str, seed: int, blocks: List[str]) -> Dict[str, Any]:
             dets = ["adwin"]
         for s in STRATS:
             for d in dets:
-                out = run_triggered(P, y, drifts, _cfg(strategy=s, detector=d), seed=seed)
+                out = run_triggered(
+                    P, y, drifts,
+                    _cfg(strategy=s, detector=d, optimizer=optimizer, de=de_base),
+                    seed=seed,
+                )
                 block = "main" if d == "adwin" else "detector"
                 record(block, s, out.y_hat, {}, keep_curve=(d == "adwin"), out=out, detector=d)
 
@@ -153,8 +171,11 @@ def job(dataset: str, seed: int, blocks: List[str]) -> Dict[str, Any]:
 
     if "sensitivity" in blocks and dataset in SENS_DATASETS:
         for s in STRATS:
-            for factor, value, kw in sensitivity_grid():
-                out = run_triggered(P, y, drifts, _cfg(strategy=s, **json.loads(json.dumps(kw))), seed=seed)
+            for factor, value, kw in sensitivity_grid(optimizer):
+                kw_copy = json.loads(json.dumps(kw))
+                if optimizer == "de":
+                    kw_copy["de"] = {**de_base, **kw_copy.get("de", {})}
+                out = run_triggered(P, y, drifts, _cfg(strategy=s, optimizer=optimizer, **kw_copy), seed=seed)
                 record("sensitivity", s, out.y_hat, {"factor": factor, "value": str(value)},
                        keep_curve=False, out=out, detector="adwin")
 
@@ -167,15 +188,30 @@ def main() -> None:
     ap.add_argument("--seeds", type=int, default=30)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--blocks", nargs="+", default=["main", "baselines", "benchmarks", "detector", "sensitivity"])
+    ap.add_argument("--optimizer", choices=["ga", "de"], default="ga")
+    ap.add_argument("--de-strategy", choices=sorted(DE_STRATEGIES), default="rand/1/bin")
+    ap.add_argument("--de-F", type=float, default=0.5)
+    ap.add_argument("--de-CR", type=float, default=0.9)
+    ap.add_argument("--de-dither", action="store_true")
     ap.add_argument("--out", default=str(PROJECT_ROOT / "results" / "raw"))
     args = ap.parse_args()
 
+    de_kwargs = {
+        "strategy": args.de_strategy,
+        "F": args.de_F,
+        "CR": args.de_CR,
+        "dither": args.de_dither,
+    }
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     rows, events, curves = [], [], {}
     t0 = time.time()
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(job, d, s, args.blocks): (d, s) for s in range(args.seeds) for d in args.datasets}
+        futs = {
+            ex.submit(job, d, s, args.blocks, args.optimizer, de_kwargs): (d, s)
+            for s in range(args.seeds)
+            for d in args.datasets
+        }
         for i, f in enumerate(as_completed(futs), 1):
             r = f.result()
             rows += r["rows"]

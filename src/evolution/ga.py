@@ -5,48 +5,20 @@ Operadores padrão: torneio k=3, BLX-α (α=0,5; pc=0,9), mutação gaussiana po
 (pm=1/M; σ=0,1) com clip em [0,1], substituição geracional com elitismo de 2.
 Parada: G=50 gerações ou 10 gerações sem melhoria do melhor.
 
-Também contém a Evolução Diferencial DE/rand/1/bin (baseline B8) e a busca aleatória (B7),
-que compartilham a mesma interface ``run(pop0, fitness, rng) -> OptResult``.
+Também contém a busca aleatória (B7) e reexporta ``DifferentialEvolution`` (``de.py``)
+por compatibilidade; todos compartilham a interface ``run(pop0, fitness, rng) -> OptResult``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
 from src.evaluation.objectives import repair_simplex
-
-FitnessFn = Callable[[np.ndarray], np.ndarray]
-
-
-def random_simplex(n: int, m: int, rng: np.random.Generator) -> np.ndarray:
-    """Amostragem uniforme no simplex: Dirichlet(1, ..., 1)."""
-    return rng.dirichlet(np.ones(m), size=n)
-
-
-def mean_pairwise_distance(pop: np.ndarray) -> float:
-    """Diversidade: distância euclidiana média entre pares de indivíduos."""
-    n = len(pop)
-    if n < 2:
-        return 0.0
-    d = np.sqrt(((pop[:, None, :] - pop[None, :, :]) ** 2).sum(-1))
-    return float(d[np.triu_indices(n, 1)].mean())
-
-
-@dataclass
-class OptResult:
-    pop: np.ndarray            # população final (N, M)
-    fit: np.ndarray            # fitness da população final (N,)
-    best: np.ndarray           # melhor indivíduo (M,)
-    best_fit: float
-    history: List[float]       # melhor fitness por geração (gen 0 = população inicial)
-    n_evals: int
-    n_gens: int
-    div_start: float
-    div_end: float
-    init_best_fit: float = field(default=0.0)
+from src.evolution.base import FitnessFn, OptResult, mean_pairwise_distance, random_simplex
+from src.evolution.de import DEConfig, DifferentialEvolution
 
 
 @dataclass
@@ -144,49 +116,6 @@ class GeneticAlgorithm:
                          history=best_hist, n_evals=n_evals, n_gens=gen,
                          div_start=div_start, div_end=mean_pairwise_distance(pop),
                          init_best_fit=best_hist[0])
-
-
-class DifferentialEvolution:
-    """DE/rand/1/bin (Storn & Price, 1997) com reparo no simplex — baseline B8."""
-
-    def __init__(self, F: float = 0.5, CR: float = 0.9, max_gens: int = 50,
-                 stagnation: int = 10) -> None:
-        self.F, self.CR, self.max_gens, self.stagnation = F, CR, max_gens, stagnation
-
-    def run(self, pop0: np.ndarray, fitness: FitnessFn, rng: np.random.Generator,
-            hypermutation: bool = False) -> OptResult:  # noqa: ARG002
-        pop = repair_simplex(np.asarray(pop0, dtype=float))
-        N, M = pop.shape
-        fit = fitness(pop)
-        n_evals = N
-        hist = [float(fit.max())]
-        div_start = mean_pairwise_distance(pop)
-        no_improve = 0
-        gen = 0
-        for gen in range(1, self.max_gens):
-            idx = np.array([rng.choice(np.delete(np.arange(N), i), 3, replace=False) for i in range(N)])
-            mutant = pop[idx[:, 0]] + self.F * (pop[idx[:, 1]] - pop[idx[:, 2]])
-            cross = rng.random((N, M)) < self.CR
-            cross[np.arange(N), rng.integers(0, M, N)] = True
-            trial = repair_simplex(np.clip(np.where(cross, mutant, pop), 0.0, 1.0))
-            tfit = fitness(trial)
-            n_evals += N
-            better = tfit >= fit
-            pop = np.where(better[:, None], trial, pop)
-            fit = np.where(better, tfit, fit)
-            cur = float(fit.max())
-            if cur > hist[-1] + 1e-12:
-                no_improve = 0
-            else:
-                no_improve += 1
-            hist.append(max(cur, hist[-1]))
-            if no_improve >= self.stagnation:
-                break
-        b = int(fit.argmax())
-        return OptResult(pop=pop, fit=fit, best=pop[b].copy(), best_fit=float(fit[b]),
-                         history=hist, n_evals=n_evals, n_gens=gen,
-                         div_start=div_start, div_end=mean_pairwise_distance(pop),
-                         init_best_fit=hist[0])
 
 
 class RandomSearch:

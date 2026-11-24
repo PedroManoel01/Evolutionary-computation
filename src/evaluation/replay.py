@@ -17,9 +17,9 @@ from typing import Any, Dict, List, Optional, Sequence
 import numpy as np
 from river import drift
 
-from src.evaluation.objectives import macro_f1_batch
+from src.evaluation.objectives import macro_f1_batch, make_macro_f1_objective
+from src.evolution.de import DEConfig, DifferentialEvolution
 from src.evolution.ga import (
-    DifferentialEvolution,
     GAConfig,
     GeneticAlgorithm,
     RandomSearch,
@@ -112,6 +112,7 @@ class ReplayConfig:
     immigrant_rate: float = 0.3
     memory_capacity: int = 10
     ga: GAConfig = field(default_factory=GAConfig)
+    de: DEConfig = field(default_factory=DEConfig)
 
 
 @dataclass
@@ -145,13 +146,16 @@ def run_triggered(P: np.ndarray, y: np.ndarray, drift_positions: Sequence[int],
 
     if cfg.optimizer == "ga":
         opt = GeneticAlgorithm(cfg.ga)
+        pop_size = cfg.ga.pop_size
     elif cfg.optimizer == "de":
-        opt = DifferentialEvolution(max_gens=cfg.ga.max_gens, stagnation=cfg.ga.stagnation)
+        opt = DifferentialEvolution(cfg.de)
+        pop_size = cfg.de.pop_size
     elif cfg.optimizer == "random":
         opt = RandomSearch(budget=cfg.ga.pop_size * cfg.ga.max_gens, keep=cfg.ga.pop_size)
+        pop_size = cfg.ga.pop_size
     else:
         raise ValueError(cfg.optimizer)
-    strat = PostDriftStrategy(cfg.strategy, pop_size=cfg.ga.pop_size,
+    strat = PostDriftStrategy(cfg.strategy, pop_size=pop_size,
                               immigrant_rate=cfg.immigrant_rate,
                               memory_capacity=cfg.memory_capacity)
     det = make_detector(cfg.detector, drift_positions)
@@ -170,7 +174,7 @@ def run_triggered(P: np.ndarray, y: np.ndarray, drift_positions: Sequence[int],
         PE, yE = P[idx], y[idx]
         fitness = lambda pop: macro_f1_batch(pop, PE, yE)  # noqa: E731
         if initial:
-            pop0 = random_simplex(cfg.ga.pop_size, M, rng)
+            pop0 = random_simplex(pop_size, M, rng)
         else:
             pop0 = strat.initial_population(prev_pop, prev_fit, M, rng)
         res = opt.run(pop0, fitness, rng, hypermutation=(strat.hypermutation and not initial))
@@ -248,6 +252,210 @@ def run_triggered(P: np.ndarray, y: np.ndarray, drift_positions: Sequence[int],
             det.reset()
             err_all = None                # pesos mudaram: recalcula erros futuros
         t += 1
+
+    return RunOutput(y_hat, events, detections, time.perf_counter() - t0, n_evals, w)
+
+
+def run_deto_replay(
+    P: np.ndarray,
+    y: np.ndarray,
+    drift_positions: Sequence[int],
+    *,
+    n_init: int = 500,
+    n_min: int = 100,
+    b_max: int = 2000,
+    detector: str = "adwin",
+    deto_n_init: int = 16,
+    deto_n_iter: int = 20,
+    seed: int = 42,
+) -> RunOutput:
+    """Replay prequencial do baseline DETO (Transfer BO) sobre as matrizes P em cache."""
+    from src.baselines.deto_adapter import DETOAdapter
+
+    t0 = time.perf_counter()
+    n, M, _ = P.shape
+    deto = DETOAdapter(n_models=M, n_init=deto_n_init, n_iter=deto_n_iter, seed=seed)
+    det = make_detector(detector, drift_positions)
+
+    w = np.full(M, 1.0 / M)
+    y_hat = np.empty(n, dtype=np.int64)
+    y_hat[:] = _predict(P, w)
+    events: List[Dict[str, Any]] = []
+    detections: List[int] = []
+    n_evals = 0
+
+    def optimize(idx: np.ndarray, t_detect: int, t_now: int, initial: bool) -> None:
+        nonlocal w, n_evals
+        PE, yE = P[idx], y[idx]
+        raw_obj = make_macro_f1_objective(PE, yE, minimize=True)
+        ev_evals = 0
+
+        def counted_obj(W: np.ndarray) -> np.ndarray:
+            nonlocal ev_evals
+            arr = np.asarray(W, dtype=float)
+            ev_evals += 1 if arr.ndim == 1 else len(arr)
+            return raw_obj(W)
+
+        old_w_fit = float(macro_f1_batch(w[None, :], PE, yE)[0])
+        w_new, best_f1 = deto.optimize(counted_obj)
+        n_evals += ev_evals
+        w = w_new
+        if t_now + 1 < n:
+            y_hat[t_now + 1:] = _predict(P[t_now + 1:], w)
+        events.append({
+            "t_detect": t_detect,
+            "t_apply": t_now + 1,
+            "eval_size": len(idx),
+            "initial": initial,
+            "init_best": float("nan"),
+            "best_fit": float(best_f1),
+            "old_w_fit": old_w_fit,
+            "n_gens": deto_n_iter,
+            "n_evals": ev_evals,
+            "gens_to_95": float("nan"),
+            "div_start": float("nan"),
+            "div_end": float("nan"),
+            "history": [],
+            "weights": w.tolist(),
+        })
+
+    n_init_eff = min(n_init, n)
+    optimize(np.arange(n_init_eff), n_init_eff - 1, n_init_eff - 1, initial=True)
+
+    err_all = None
+    buffer: deque = deque(maxlen=b_max)
+    in_warning = False
+    warn_steps = 0
+    awaiting = False
+    E: List[int] = []
+    t_detect = -1
+    is_oracle = isinstance(det, _Oracle)
+
+    t = n_init_eff
+    while t < n:
+        if err_all is None:
+            err_all = (y_hat != y).astype(np.int64)
+        err = int(err_all[t])
+        if is_oracle:
+            warn, dr = det.update_at(t)
+        else:
+            warn, dr = det.update(err)
+
+        if awaiting:
+            E.append(t)
+        elif dr:
+            detections.append(t)
+            t_detect = t
+            E = list(buffer) + [t]
+            buffer.clear()
+            in_warning = False
+            awaiting = True
+            det.reset()
+        else:
+            if det.has_warning_state:
+                if warn:
+                    in_warning = True
+                elif in_warning:
+                    in_warning = False
+                    buffer.clear()
+            elif warn and not in_warning:
+                in_warning = True
+                warn_steps = 0
+            if in_warning:
+                buffer.append(t)
+                warn_steps += 1
+                if not det.has_warning_state and warn_steps > b_max:
+                    in_warning = False
+                    buffer.clear()
+
+        if awaiting and len(E) >= n_min:
+            optimize(np.asarray(E[-b_max:]), t_detect, t, initial=False)
+            awaiting = False
+            E = []
+            det.reset()
+            err_all = None
+        t += 1
+
+    return RunOutput(y_hat, events, detections, time.perf_counter() - t0, n_evals, w)
+
+
+def run_dase_replay(
+    P: np.ndarray,
+    y: np.ndarray,
+    *,
+    n_init: int = 500,
+    chunk_interval: int = 1000,
+    window_size: int = 500,
+    chunk_size: int = 50,
+    pop_size: int = 50,
+    max_iter: int = 30,
+    seed: int = 42,
+) -> RunOutput:
+    """Replay prequencial do baseline DASE (HCDD + RBFN + DE) sobre as matrizes P em cache."""
+    from src.baselines.dase_adapter import DASEAdapter
+
+    t0 = time.perf_counter()
+    n, M, _ = P.shape
+    dase = DASEAdapter(
+        n_models=M,
+        chunk_size=chunk_size,
+        pop_size=pop_size,
+        max_iter=max_iter,
+        seed=seed,
+    )
+
+    w = np.full(M, 1.0 / M)
+    y_hat = np.empty(n, dtype=np.int64)
+    y_hat[:] = _predict(P, w)
+    events: List[Dict[str, Any]] = []
+    detections: List[int] = []
+    n_evals = 0
+
+    def step_at(idx: np.ndarray, t_now: int, initial: bool) -> None:
+        nonlocal w, n_evals
+        PE, yE = P[idx], y[idx]
+        raw_obj = make_macro_f1_objective(PE, yE, minimize=True)
+        ev_evals = 0
+
+        def counted_obj(W: np.ndarray) -> np.ndarray:
+            nonlocal ev_evals
+            arr = np.asarray(W, dtype=float)
+            ev_evals += 1 if arr.ndim == 1 else len(arr)
+            return raw_obj(W)
+
+        old_w_fit = float(macro_f1_batch(w[None, :], PE, yE)[0])
+        w_new, best_f1, hcdd_drift = dase.step(counted_obj)
+        n_evals += ev_evals
+        w = w_new
+        if hcdd_drift:
+            detections.append(t_now)
+        if t_now + 1 < n:
+            y_hat[t_now + 1:] = _predict(P[t_now + 1:], w)
+        events.append({
+            "t_detect": t_now,
+            "t_apply": t_now + 1,
+            "eval_size": len(idx),
+            "initial": initial,
+            "hcdd_drift": bool(hcdd_drift),
+            "init_best": float("nan"),
+            "best_fit": float(best_f1),
+            "old_w_fit": old_w_fit,
+            "n_gens": max_iter,
+            "n_evals": ev_evals,
+            "gens_to_95": float("nan"),
+            "div_start": float("nan"),
+            "div_end": float("nan"),
+            "history": [],
+            "weights": w.tolist(),
+        })
+
+    n_init_eff = min(n_init, n)
+    step_at(np.arange(n_init_eff), n_init_eff - 1, initial=True)
+
+    for t in range(n_init_eff, n):
+        if (t + 1) % chunk_interval == 0:
+            start = max(0, t + 1 - window_size)
+            step_at(np.arange(start, t + 1), t, initial=False)
 
     return RunOutput(y_hat, events, detections, time.perf_counter() - t0, n_evals, w)
 
