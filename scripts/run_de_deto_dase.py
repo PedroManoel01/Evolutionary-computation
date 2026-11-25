@@ -64,14 +64,15 @@ TRANSITION = {"AGR-Grad": 2000}
 CURVE_STEP = 100
 
 
-def _de_sensitivity_grid(base_strategy: str) -> List[tuple[str, Any, Dict[str, Any]]]:
+def _de_sensitivity_grid(base_strategy: str, base_n_min: int = 500) -> List[tuple[str, Any, Dict[str, Any]]]:
     g: List[tuple[str, Any, Dict[str, Any]]] = []
     for N in (10, 50):
         g.append(("N", N, {"de": {"pop_size": N}}))
     for G in (20, 100):
         g.append(("G", G, {"de": {"max_gens": G}}))
-    for nm in (50, 200):
-        g.append(("n_min", nm, {"n_min": nm}))
+    for nm in (100, 200, 500):
+        if nm != base_n_min:
+            g.append(("n_min", nm, {"n_min": nm}))
     for ir in (0.1, 0.5):
         g.append(("immigrant_rate", ir, {"immigrant_rate": ir}))
     for strat in ("rand/1/bin", "best/1/bin", "current-to-best/1/bin"):
@@ -205,16 +206,21 @@ def job(
         CR=params["de_CR"],
         strategy=params["de_strategy"],
         dither=params["de_dither"],
+        hyper_sigma=params["de_hyper_sigma"],
     )
     ga_cfg = GAConfig(
         pop_size=params["pop_size"],
         max_gens=params["max_gens"],
         stagnation=params["stagnation"],
+        blx_alpha=params["ga_blx_alpha"],
     )
+
+    n_min = params["n_min"]
 
     if "de" in blocks:
         for s in STRATS:
             cfg = ReplayConfig(
+                n_min=n_min,
                 strategy=s,
                 detector=detector,
                 optimizer="de",
@@ -227,6 +233,7 @@ def job(
     if "ga" in blocks:
         for s in STRATS:
             cfg = ReplayConfig(
+                n_min=n_min,
                 strategy=s,
                 detector=detector,
                 optimizer="ga",
@@ -241,6 +248,7 @@ def job(
             P,
             y,
             drifts,
+            n_min=n_min,
             detector=detector,
             deto_n_init=params["deto_n_init"],
             deto_n_iter=params["deto_n_iter"],
@@ -274,7 +282,7 @@ def job(
             record("baselines", b, r["y_hat"], extra)
         out = run_triggered(
             P, y, drifts,
-            ReplayConfig(strategy="S1", detector=detector, optimizer="random", ga=ga_cfg),
+            ReplayConfig(n_min=n_min, strategy="S1", detector=detector, optimizer="random", ga=ga_cfg),
             seed=seed,
         )
         record("baselines", "B7", out.y_hat, {}, out=out, det_label=detector)
@@ -295,6 +303,7 @@ def job(
         for s in STRATS:
             for d in extra_dets:
                 cfg = ReplayConfig(
+                    n_min=n_min,
                     strategy=s,
                     detector=d,
                     optimizer="de",
@@ -322,11 +331,12 @@ def job(
             "CR": params["de_CR"],
             "strategy": params["de_strategy"],
             "dither": params["de_dither"],
+            "hyper_sigma": params["de_hyper_sigma"],
         }
         for s in STRATS:
-            for factor, value, kw in _de_sensitivity_grid(params["de_strategy"]):
+            for factor, value, kw in _de_sensitivity_grid(params["de_strategy"], n_min):
                 de_override = {**de_base_dict, **kw.get("de", {})}
-                replay_kw = {k: v for k, v in kw.items() if k != "de"}
+                replay_kw = {"n_min": n_min, **{k: v for k, v in kw.items() if k != "de"}}
                 cfg = ReplayConfig(
                     strategy=s,
                     detector=detector,
@@ -364,6 +374,12 @@ def parse_args() -> argparse.Namespace:
         choices=["de", "ga", "deto", "dase", "baselines", "benchmarks", "detector", "sensitivity"],
     )
     ap.add_argument("--detector", choices=["adwin", "ddm", "oracle"], default="adwin")
+    ap.add_argument(
+        "--n-min",
+        type=int,
+        default=500,
+        help="Mínimo de instâncias no conjunto de avaliação E após drift para DE, AG, DETO e B7 (padrão: 500).",
+    )
     ap.add_argument("--max-instances", type=int, default=None, help="Opcional: trunca a stream para testes rápidos.")
     ap.add_argument("--build-missing-cache", action="store_true", help="Gera o cache automaticamente se estiver ausente.")
 
@@ -371,10 +387,12 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--pop-size", type=int, default=30)
     ap.add_argument("--max-gens", type=int, default=50)
     ap.add_argument("--stagnation", type=int, default=10)
-    ap.add_argument("--de-strategy", choices=sorted(DE_STRATEGIES), default="rand/1/bin")
-    ap.add_argument("--de-F", type=float, default=0.5)
-    ap.add_argument("--de-CR", type=float, default=0.9)
+    ap.add_argument("--de-strategy", choices=sorted(DE_STRATEGIES), default="current-to-best/1/exp")
+    ap.add_argument("--de-F", type=float, default=0.8)
+    ap.add_argument("--de-CR", type=float, default=0.5)
     ap.add_argument("--de-dither", action="store_true")
+    ap.add_argument("--de-hyper-sigma", type=float, default=0.1)
+    ap.add_argument("--ga-blx-alpha", type=float, default=0.25)
 
     # Hiperparâmetros do DETO
     ap.add_argument("--deto-n-init", type=int, default=12)
@@ -533,13 +551,21 @@ def main() -> None:
 
     # 3) Executa os experimentos pendentes com salvamento incremental por (dataset, seed)
     t0 = time.time()
+    failed: List[tuple[str, int, str]] = []
     try:
         if pending:
             with _progress(len(pending), desc="Experimentos") as pbar:
                 if args.workers <= 1:
                     for d, s in pending:
                         tj = time.perf_counter()
-                        r = job(d, s, args.blocks, params)
+                        try:
+                            r = job(d, s, args.blocks, params)
+                        except Exception as exc:
+                            msg = f"{type(exc).__name__}: {exc}"
+                            failed.append((d, s, msg))
+                            print(f"\n[ERRO] {d} s{s:02d}: {msg}", flush=True)
+                            pbar.update(1)
+                            continue
                         _save_ckpt(out_dir, d, s, r)
                         rows.extend(r["rows"])
                         events.extend(r["events"])
@@ -551,8 +577,15 @@ def main() -> None:
                     with ProcessPoolExecutor(max_workers=args.workers) as ex:
                         futs = {ex.submit(job, d, s, args.blocks, params): (d, s) for d, s in pending}
                         for f in as_completed(futs):
-                            r = f.result()
                             d, s = futs[f]
+                            try:
+                                r = f.result()
+                            except Exception as exc:
+                                msg = f"{type(exc).__name__}: {exc}"
+                                failed.append((d, s, msg))
+                                print(f"\n[ERRO] {d} s{s:02d}: {msg}", flush=True)
+                                pbar.update(1)
+                                continue
                             _save_ckpt(out_dir, d, s, r)
                             rows.extend(r["rows"])
                             events.extend(r["events"])
@@ -562,8 +595,16 @@ def main() -> None:
                             pbar.update(1)
     finally:
         _save_consolidated(out_dir, rows, events, curves, include_heavy=True)
+        if failed:
+            (out_dir / "errors.log").write_text(
+                "\n".join(f"{d} s{s:02d}: {msg}" for d, s, msg in failed) + "\n",
+                encoding="utf-8",
+            )
 
-    print(f"OK: {len(rows)} execuções, {len(events)} eventos em {time.time() - t0:.1f}s -> {out_dir}")
+    print(
+        f"OK: {len(rows)} execuções, {len(events)} eventos, {len(failed)} falhas "
+        f"em {time.time() - t0:.1f}s -> {out_dir}"
+    )
 
 
 if __name__ == "__main__":

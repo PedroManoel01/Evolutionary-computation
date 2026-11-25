@@ -82,10 +82,16 @@ class DETOAdapter:
 
             emukit_model = WrapperBase(model)
             for _ in range(self.n_iter):
-                model.fit(TaskData(X, Y), optimize=True)
+                try:
+                    model.fit(TaskData(X, Y), optimize=True)
+                except np.linalg.LinAlgError:
+                    break
                 af = UCB(emukit_model, beta=np.float64(3.0))
                 optimizer = GradientAcquisitionOptimizer(space)
-                X_new, _ = optimizer.optimize(af)
+                try:
+                    X_new, _ = optimizer.optimize(af)
+                except np.linalg.LinAlgError:
+                    break
                 Y_new = np.atleast_2d(objective_fn(X_new)).reshape(-1, 1)
                 X = np.vstack([X, X_new])
                 Y = np.vstack([Y, Y_new])
